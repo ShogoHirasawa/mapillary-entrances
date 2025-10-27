@@ -1,143 +1,247 @@
-import os, json
+# Mapillary fetch + 360 slicing + JSON writing
+
+import os
+import json
+import time
 from pathlib import Path
-from typing import Dict, List, Optional
-from shapely.wkt import loads as load_wkt
-from shapely.geometry import Polygon
-from .config import RESULTS_ROOT
+from typing import Optional, List, Dict
+from .mly_utils import fetch_images, download_image
 from .pano_slices import slice_equirectangular
-from . import mly_utils as mly
+from .utils import tlog
+from .utils import polygon_vertices_from_wkt, polygon_walls_from_wkt
 
-def _download_image(url: str, out_path: Path) -> None:
-    import requests
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with requests.get(url, stream=True, timeout=30) as r:
-        r.raise_for_status()
-        with open(out_path, "wb") as f:
-            for chunk in r.iter_content(1024):
-                f.write(chunk)
 
-def view_cone_polygon(cam_lon, cam_lat, heading_deg, half_angle_deg, length_m) -> Polygon:
-    from math import radians, cos, sin
-    from shapely.affinity import rotate, translate
-    dlat = 1/111_320.0
-    dlon = dlat / max(0.01, abs(cos(radians(cam_lat))))
-    Lx = length_m * dlon
-    Ly = length_m * dlat
-    tri = Polygon([(0,0), (-Lx*sin(radians(half_angle_deg)), Ly*cos(radians(half_angle_deg))),
-                           ( Lx*sin(radians(half_angle_deg)), Ly*cos(radians(half_angle_deg)))])
-    tri = rotate(tri, angle=heading_deg, origin=(0,0), use_radians=False)
-    return translate(tri, xoff=cam_lon, yoff=cam_lat)
+
+def _ensure_dir(path: Path):
+    """Create directory if it doesn’t exist."""
+    path.mkdir(parents=True, exist_ok=True)
+
 
 def fetch_and_slice_for_building(
-    b_row,
-    radius_m: int = 120,
-    min_capture_date: Optional[str] = None,
-    apply_fov: bool = True,
-    max_images_per_building: int = 8,
-    prefer_360: bool = True,
-    fov_half_angle: float = 25.0,
+    building_row,
+    radius_m: int,
+    min_capture_date: Optional[str],
+    apply_fov: bool,
+    max_images_per_building: int,
+    prefer_360: bool,
+    fov_half_angle: float,
 ) -> List[Dict]:
+    """
+    Fetch Mapillary images near a building centroid and optionally slice panoramas.
+    Returns list of metadata dicts (and saves images locally).
+    """
+    lat, lon = building_row["lat"], building_row["lon"]
+    building_id = building_row["id"]
     token = os.getenv("MAPILLARY_ACCESS_TOKEN")
     if not token:
         raise RuntimeError("MAPILLARY_ACCESS_TOKEN missing")
 
-    b_id = b_row["id"]
-    lat = float(b_row["lat"]); lon = float(b_row["lon"])
-    out_dir = RESULTS_ROOT / str(b_id)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(f"results/buildings/{building_id}")
+    _ensure_dir(out_dir)
 
-    images = mly.fetch_images(
-        token=token, lat=lat, lon=lon, radius_m=radius_m,
-        min_capture_date_filter=min_capture_date, prefer_360=prefer_360
+    t0 = time.perf_counter()
+    print(f"📦 Building {building_id} @ ({lat:.6f},{lon:.6f}) – radius {radius_m} m")
+
+    # ---- fetch images using your actual mly_utils signature ----
+    imgs = fetch_images(
+        token=token,
+        fields=[
+            "id",
+            "computed_geometry",
+            "captured_at",
+            "compass_angle",
+            "thumb_1024_url",
+            "camera_type",
+        ],
+        prefer_360=prefer_360,
+        min_capture_date_filter=min_capture_date,
+        radius_m=radius_m,
+        lat=lat,
+        lon=lon,
     )
-    if not images:
-        print("  ↳ no images nearby"); return []
 
-    if apply_fov:
-        def fov_pass(im):
-            try:
-                compass = im.get("compass_angle") or im.get("computed_compass_angle")
-                geom = im.get("computed_geometry") or im.get("geometry")
-                if compass is None or geom is None: return False
-                cam_lon, cam_lat = geom["coordinates"]
-                b = mly._bearing(cam_lat, cam_lon, lat, lon)
-                diff = abs((b - compass + 180) % 360 - 180)
-                return diff <= fov_half_angle
-            except Exception:
-                return False
-        images = sorted(images, key=lambda im: not fov_pass(im))
+    if not imgs:
+        print("  ↳ no images nearby")
+        return []
 
-    building_polygon = None
-    wkt_str = b_row.get("wkt")
-    if wkt_str:
-        try: building_polygon = load_wkt(wkt_str)
-        except Exception: pass
+    # cap results
+    imgs = imgs[:max_images_per_building]
 
-    if building_polygon is not None:
-        filtered = []
-        for im in images:
-            compass = im.get("compass_angle") or im.get("computed_compass_angle")
-            geom = im.get("computed_geometry") or im.get("geometry")
-            if not (compass and geom and isinstance(geom.get("coordinates"), (list, tuple))):
-                continue
-            cam_lon, cam_lat = geom["coordinates"]
-            cone = view_cone_polygon(cam_lon, cam_lat, compass, fov_half_angle, radius_m)
-            if cone.intersects(building_polygon):
-                filtered.append(im)
-        images = filtered
+    saved = []
+    for img in imgs:
+        img_id = img.get("id")
+        img_path = out_dir / f"{img_id}.jpg"
+        download_image(img.get("thumb_1024_url"), img_path)
+        saved.append({
+            "id": img_id,
+            "path": str(img_path),
+            "coordinates": img.get("computed_geometry", {}).get("coordinates"),
+            "compass_angle": img.get("compass_angle"),
+            "camera_type": img.get("camera_type"),
+            "captured_at": img.get("captured_at"),
+        })
 
-    images = images[:max_images_per_building]
-    print(f"  ↳ saving {len(images)} images to {out_dir}")
+    # ---- slice panoramas if enabled ----
+    if prefer_360:
+        n_before = len(saved)
+        saved = slice_equirectangular(saved, fov_half_angle=fov_half_angle)
+        print(f"  ✓ done building {building_id} ({n_before} originals, {len(saved)} kept 360-slices)")
+    else:
+        print(f"  ✓ done building {building_id} ({len(saved)} images)")
 
-    saved, slice_saved = [], []
-    for idx, im in enumerate(images, start=1):
-        meta_path = out_dir / f"{idx:02d}.json"
-        meta_path.write_text(json.dumps(im, indent=2), encoding="utf-8")
-        url = (im.get("thumb_1024_url") or im.get("thumb_2048_url") or
-               im.get("thumb_256_url")  or im.get("thumb_original_url"))
-        img_path = out_dir / f"{idx:02d}.jpg" if url else None
-        if url: _download_image(url, img_path)
-        saved.append({"file": img_path.name if img_path else None, "meta": meta_path.name})
-
-        if img_path and ((im.get("camera_type") or "").lower() in ("spherical","equirectangular","panorama","panoramic","360")):
-            chips = slice_equirectangular(
-                img_path=img_path, out_dir=out_dir / "slices",
-                slice_deg=int(os.getenv("PANO_SLICE_DEG","60")),
-                overlap_deg=int(os.getenv("PANO_SLICE_OVERLAP","0")),
-            )
-            compass = im.get("compass_angle") or im.get("computed_compass_angle")
-            geom = im.get("computed_geometry") or im.get("geometry")
-            if compass is None or geom is None:
-                for ch in chips:
-                    slice_saved.append({"source": saved[-1]["file"], "slice_path": ch["path"]})
-            else:
-                cam_lon, cam_lat = geom["coordinates"]
-                bearing_to_building = mly._bearing(cam_lat, cam_lon, lat, lon)
-                slice_deg = int(os.getenv("PANO_SLICE_DEG","60")); half_w = slice_deg/2
-                for ch in chips:
-                    center_local = ch["center_local_deg"]
-                    center_abs   = (compass + (center_local - 180.0)) % 360.0
-                    diff = abs((bearing_to_building - center_abs + 180) % 360 - 180)
-                    if diff <= half_w:
-                        slice_saved.append({
-                            "source": saved[-1]["file"], "slice_path": ch["path"],
-                            "center_abs_deg": center_abs,
-                            "bearing_to_building_deg": bearing_to_building,
-                            "angle_diff_deg": diff
-                        })
-    if slice_saved:
-        (out_dir / "slices_manifest.json").write_text(json.dumps(slice_saved, indent=2), encoding="utf-8")
-
-    print(f"  ✓ done building {b_id} ({len(saved)} originals, {len(slice_saved)} kept 360-slices)")
+    tlog("  ✓ building done", t0)
     return saved
 
-def write_candidates_json(b_row, best_place, saved_images):
-    out_dir = (RESULTS_ROOT / str(b_row["id"]))
-    out = {
-        "building": {"id": b_row["id"], "lon": float(b_row["lon"]), "lat": float(b_row["lat"]), "wkt": b_row.get("wkt", None)},
-        "place": best_place,
-        "images": saved_images,
+
+def _extract_lon_lat(rec, fallback_lon, fallback_lat):
+    """
+    Try multiple fields to recover (lon, lat). Return floats.
+    Priority:
+      1) rec['lon'], rec['lat']
+      2) rec['lng'], rec['lat']               # sometimes 'lng' is used
+      3) rec['image_lon'], rec['image_lat']   # upstream variants
+      4) rec['orig_lon'], rec['orig_lat']     # originals before slicing
+      5) rec['coordinates'] = [lon, lat]
+      6) fallback (building center)
+    """
+    def _ok(a, b):
+        return isinstance(a, (int, float)) and isinstance(b, (int, float))
+
+    cand_pairs = [
+        ("lon", "lat"),
+        ("lng", "lat"),
+        ("image_lon", "image_lat"),
+        ("orig_lon", "orig_lat"),
+    ]
+    for lo_k, la_k in cand_pairs:
+        lo, la = rec.get(lo_k), rec.get(la_k)
+        if _ok(lo, la):
+            return float(lo), float(la)
+
+    coords = rec.get("coordinates")
+    if isinstance(coords, (list, tuple)) and len(coords) >= 2:
+        lo, la = coords[0], coords[1]
+        if _ok(lo, la):
+            return float(lo), float(la)
+
+    # last resort – building center (ensures numbers, never nulls)
+    return float(fallback_lon), float(fallback_lat)
+
+
+def write_candidates_json(building_row, best_place, saved, out_dir=None):
+    """
+    Write candidates.json for a building and return [(evan_image_dict, wall_pair), ...].
+
+    - building_row: pandas Series with at least id, lat, lon, wkt
+    - best_place: dict or None
+    - saved: list of dicts produced by fetch_and_slice_for_building()
+      each item typically has:
+        {
+          "id": <image id>,
+          "path": <slice or original path>,
+          "lon": <float>,
+          "lat": <float>,
+          "compass_angle": <float or None>,
+          "camera_type": "spherical" | "perspective" | None,
+          "captured_at": <int or None>,
+          "slice_index": <int or None>
+        }
+    - out_dir: optional override; if None, derived from first saved path
+    """
+    # ---------- derive output dir ----------
+    if out_dir is None:
+        # use dir of first saved item if available; otherwise a sensible default
+        if saved and "path" in saved[0]:
+            out_dir = os.path.dirname(saved[0]["path"])
+        else:
+            out_dir = os.path.join("results", "buildings", str(building_row["id"]))
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ---------- building core ----------
+    # prefer column 'wkt'; fallbacks included for safety
+    building_wkt = (
+        building_row.get("wkt")
+        or building_row.get("geom_wkt")
+        or building_row.get("geometry_wkt")
+    )
+    if not building_wkt:
+        raise ValueError("write_candidates_json: building_row has no WKT field ('wkt').")
+
+    building_rec = {
+        "id": str(building_row["id"]),
+        "lon": float(building_row["lon"]),
+        "lat": float(building_row["lat"]),
+        "wkt": str(building_wkt),
     }
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "candidates.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
-    print(f"  ✓ wrote {out_dir/'candidates.json'}")
+
+    # ---------- place (optional) ----------
+    place_rec = None
+    if best_place:
+        place_rec = {
+            "place_id": best_place.get("place_id"),
+            "name": best_place.get("name"),
+            "categories": best_place.get("categories"),
+            "lon": best_place.get("lon"),
+            "lat": best_place.get("lat"),
+            "inside": bool(best_place.get("inside", False)),
+            "dist_m": float(best_place.get("dist_m", 0.0)),
+        }
+
+    # ---------- images ----------
+    images_out = []
+    # we’ll use the building center as a hard fallback to avoid nulls
+    b_lon, b_lat = float(building_rec["lon"]), float(building_rec["lat"])
+
+    for r in saved:
+        img_path = r.get("path")
+        if not img_path:
+            continue
+
+        lon, lat = _extract_lon_lat(r, b_lon, b_lat)
+
+        images_out.append({
+            "id": r.get("id"),
+            "path": img_path,
+            "coordinates": [lon, lat],               # always numbers now
+            "compass_angle": r.get("compass_angle"),
+            "camera_type": r.get("camera_type"),
+            "captured_at": r.get("captured_at"),
+            "slice_index": r.get("slice_index"),
+        })
+    # ---------- polygon + walls ----------
+    polygon_xy = polygon_vertices_from_wkt(building_wkt, drop_last=True)   # [[lon,lat], ...]
+    walls = polygon_walls_from_wkt(building_wkt)                           # [[[lon,lat],[lon,lat]], ...]
+
+    # ---------- write JSON ----------
+    record = {
+        "building": building_rec,
+        "place": place_rec,
+        "images": images_out,
+        "polygon": polygon_xy,
+        "walls": walls,
+    }
+
+    out_path = os.path.join(out_dir, "candidates.json")
+    with open(out_path, "w") as f:
+        json.dump(record, f, indent=2)
+    print(f"  ✓ wrote {out_path}", flush=True)
+
+    # ---------- build Evan-friendly return value ----------
+    # Evan image dicts: {"image_path": <jpg>, "compass_angle": <float>, "coordinates": [lon,lat]}
+    evan_images = []
+    for r in images_out:
+        if not r.get("path"):
+            continue
+        evan_images.append({
+            "image_path": r["path"],
+            "compass_angle": r.get("compass_angle"),
+            "coordinates": r.get("coordinates"),  # [lon,lat]
+        })
+
+    pairs = []
+    for img in evan_images:
+        for wall in walls:
+            pairs.append((img, wall))
+
+    return pairs
+

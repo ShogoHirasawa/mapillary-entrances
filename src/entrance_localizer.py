@@ -1,4 +1,6 @@
 # entrance_localizer.py
+# Proto for geometric reasoning. (Potentially redundant with current inference.py)
+
 import json, os, glob
 from pathlib import Path
 from shapely.geometry import shape, LineString, Point, Polygon

@@ -1,4 +1,6 @@
 # ---------- Config ----------
+# names/paths for local example data and optional S3 keys
+
 from pathlib import Path
 
 RELEASE = "2025-09-24.0"

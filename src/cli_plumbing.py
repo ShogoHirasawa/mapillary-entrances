@@ -1,3 +1,15 @@
+# User CLI for bbox workflow
+# Flow: resolve sources -> gets buildings -> joins places -> loops buildings -> calls imagery pipeline -> writes to candidates.json per building
+
+# example usage 
+"""
+PYTHONUNBUFFERED=1 PYTHONPATH=. python3 -m src.cli_plumbing \
+  --bbox="-122.4045,37.7825,-122.3965,37.7895" \
+  --radius-m=120 --place-radius-m=60 \
+  --limit-buildings=10 --max-images-per-building=8 \
+  --prefer-360 --src-mode=auto
+"""
+
 import argparse, os, time, pandas as pd
 from .utils import parse_bbox_string, tlog
 from .sources import resolve_sources

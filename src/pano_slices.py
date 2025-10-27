@@ -1,56 +1,48 @@
 # src/pano_slices.py
+# Slices 360 images into crops
+
 from pathlib import Path
-from PIL import Image
+from typing import List, Dict
+import cv2
 import math
 
-def slice_equirectangular(
-    img_path: Path,
-    out_dir: Path,
-    slice_deg: int = 60,
-    overlap_deg: int = 0,
-):
+def slice_equirectangular(images: List[Dict], fov_half_angle: float = 25.0) -> List[Dict]:
     """
-    Split a 360° equirectangular image into equal angle slices.
-    Returns a list of dicts with slice metadata (local angles in [0,360)).
+    Given a list of image metadata dicts (with 'path' and optionally 'camera_type'),
+    create cropped 90° horizontal slices from 360° equirectangular images.
+
+    Returns updated list of image dicts (including new 'path' for each slice).
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
-    im = Image.open(img_path).convert("RGB")
-    W, H = im.size
+    sliced = []
+    for img in images:
+        path = Path(img["path"])
+        cam_type = img.get("camera_type", "").lower()
 
-    px_per_deg = W / 360.0
-    step_deg = max(1, slice_deg - overlap_deg)
-    step_px = max(1, int(round(step_deg * px_per_deg)))
-    slice_px = int(round(slice_deg * px_per_deg))
+        # Skip non-360s
+        if "spherical" not in cam_type and "360" not in cam_type:
+            sliced.append(img)
+            continue
 
-    n = math.ceil((W + (slice_px - step_px)) / step_px)
-    recs = []
-    for k in range(n):
-        x0 = (k * step_px) % W
-        x1 = x0 + slice_px
-        if x1 <= W:
-            chip = im.crop((x0, 0, x1, H))
-        else:
-            right = im.crop((x0, 0, W, H))
-            left = im.crop((0, 0, x1 - W, H))
-            chip = Image.new("RGB", (slice_px, H))
-            chip.paste(right, (0, 0))
-            chip.paste(left, (right.size[0], 0))
+        if not path.exists():
+            print(f"[WARN] missing file: {path}")
+            continue
 
-        start_local = (x0 / W) * 360.0
-        end_local   = (start_local + slice_deg) % 360.0
-        center_local= (start_local + slice_deg/2) % 360.0
+        im = cv2.imread(str(path))
+        if im is None:
+            print(f"[WARN] failed to read {path}")
+            continue
 
-        fname = f"{img_path.stem}_slice{k:02d}_{int(round(start_local))}-{int(round(end_local))}.jpg"
-        out_path = out_dir / fname
-        chip.save(out_path, "JPEG", quality=92)
+        h, w = im.shape[:2]
+        slice_w = w // 4  # four 90° slices (roughly quarter turns)
+        for i in range(4):
+            x1, x2 = i * slice_w, (i + 1) * slice_w
+            crop = im[:, x1:x2]
+            slice_path = path.with_name(f"{path.stem}_slice{i}.jpg")
+            cv2.imwrite(str(slice_path), crop)
 
-        recs.append({
-            "slice_index": k,
-            "path": str(out_path),
-            "width_px": chip.size[0],
-            "height_px": chip.size[1],
-            "start_local_deg": start_local,
-            "end_local_deg": end_local,
-            "center_local_deg": center_local,
-        })
-    return recs
+            new_entry = dict(img)
+            new_entry["path"] = str(slice_path)
+            new_entry["slice_index"] = i
+            sliced.append(new_entry)
+
+    return sliced

@@ -1,3 +1,5 @@
+# Joins buildings to place features near each footprint
+
 import time, math, pandas as pd
 from typing import Dict
 from .db import open_duckdb, read_parquet_expr

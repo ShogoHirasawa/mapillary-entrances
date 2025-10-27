@@ -1,3 +1,5 @@
+# Reads buildings parquet and returns a DataFrame with id, lon, lat, wkt
+
 import os, time, pandas as pd
 from typing import Dict
 from .db import open_duckdb, read_parquet_expr

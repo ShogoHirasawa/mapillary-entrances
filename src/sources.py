@@ -1,6 +1,9 @@
+# Chooses where to load data from
+
 from pathlib import Path
 from typing import Dict, Tuple
 from .config import LOCAL_BUILDINGS, LOCAL_PLACES, BUILDINGS_SRC, PLACES_SRC, RELEASE
+
 
 S3_BUILDINGS = f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=buildings/type=building/*"
 S3_PLACES    = f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=places/type=place/*"

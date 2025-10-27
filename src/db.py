@@ -1,3 +1,5 @@
+# Helpers for reading parquet/geoparquet
+
 import duckdb
 
 def open_duckdb():

@@ -2,6 +2,8 @@
 # Source: https://github.com/project-terraforma/Automated-Imagery-Feature-Annotation/blob/main/README.md
 # Modifications by Julien Howard & Evan Rantala, Fall 2025 (Project E - Entrances)
 
+# Thin Mapillarty Graph API client and simple downlaod helpers
+# must epxport MAPILLARY_ACCESS_TOKEN
 
 import os
 import math
@@ -13,6 +15,33 @@ import requests
 import cv2 # type: ignore
 import numpy as np # type: ignore
 from pathlib import Path
+
+def download_image(meta_or_url, path: Path):
+    """
+    Download an image to the given path.
+    Accepts either a URL string or a metadata dict with one of the keys:
+      thumb_1024_url, thumb_original_url, or similar.
+    """
+    if isinstance(meta_or_url, dict):
+        url = (
+            meta_or_url.get("thumb_1024_url")
+            or meta_or_url.get("thumb_original_url")
+            or meta_or_url.get("url")
+        )
+    else:
+        url = meta_or_url
+
+    if not url:
+        print(f"[WARN] No image URL provided for {path}")
+        return
+
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        with open(path, "wb") as f:
+            f.write(r.content)
+    except Exception as e:
+        print(f"[ERROR] Failed to download {url}: {e}")
 
 # ── CONSTANTS ─────────────────────────────────────────────────────────────────
 EARTH_RADIUS_M = 6378137  # mean Earth radius in metres
