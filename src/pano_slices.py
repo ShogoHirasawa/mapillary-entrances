@@ -4,9 +4,8 @@
 from pathlib import Path
 from typing import List, Dict
 import cv2
-import math
 
-def slice_equirectangular(images: List[Dict], fov_half_angle: float = 25.0) -> List[Dict]:
+def slice_equirectangular(images: List[Dict], fov_half_angle: float = 45.0) -> List[Dict]:
     """
     Given a list of image metadata dicts (with 'path' and optionally 'camera_type'),
     create cropped 90° horizontal slices from 360° equirectangular images.

@@ -5,15 +5,11 @@ import json
 import time
 from pathlib import Path
 from typing import Optional, List, Dict
-from .mly_utils import fetch_images, download_image
+from .utils import *
 from .pano_slices import slice_equirectangular
-from .utils import tlog
-from .utils import polygon_vertices_from_wkt, polygon_walls_from_wkt
-
-
 
 def _ensure_dir(path: Path):
-    """Create directory if it doesn’t exist."""
+    # create directory if it doesn't exist
     path.mkdir(parents=True, exist_ok=True)
 
 
@@ -40,9 +36,9 @@ def fetch_and_slice_for_building(
     _ensure_dir(out_dir)
 
     t0 = time.perf_counter()
-    print(f"📦 Building {building_id} @ ({lat:.6f},{lon:.6f}) – radius {radius_m} m")
+    print(f"Building {building_id}, ({lat:.6f},{lon:.6f}), radius {radius_m} m")
 
-    # ---- fetch images using your actual mly_utils signature ----
+    # fetch images using actual mly_utils signature
     imgs = fetch_images(
         token=token,
         fields=[
@@ -81,15 +77,15 @@ def fetch_and_slice_for_building(
             "captured_at": img.get("captured_at"),
         })
 
-    # ---- slice panoramas if enabled ----
+    # slice panoramas if enabled
     if prefer_360:
         n_before = len(saved)
         saved = slice_equirectangular(saved, fov_half_angle=fov_half_angle)
-        print(f"  ✓ done building {building_id} ({n_before} originals, {len(saved)} kept 360-slices)")
+        print(f"Building {building_id} ({n_before} originals, {len(saved)} kept 360-slices)")
     else:
-        print(f"  ✓ done building {building_id} ({len(saved)} images)")
+        print(f"Building {building_id} ({len(saved)} images)")
 
-    tlog("  ✓ building done", t0)
+    tlog("Building done", t0)
     return saved
 
 
@@ -148,17 +144,16 @@ def write_candidates_json(building_row, best_place, saved, out_dir=None):
         }
     - out_dir: optional override; if None, derived from first saved path
     """
-    # ---------- derive output dir ----------
+
     if out_dir is None:
-        # use dir of first saved item if available; otherwise a sensible default
+        # use dir of first saved item if available, otherwise a sensible default
         if saved and "path" in saved[0]:
             out_dir = os.path.dirname(saved[0]["path"])
         else:
             out_dir = os.path.join("results", "buildings", str(building_row["id"]))
     os.makedirs(out_dir, exist_ok=True)
 
-    # ---------- building core ----------
-    # prefer column 'wkt'; fallbacks included for safety
+    # prefer column 'wkt', fallbacks included for safety
     building_wkt = (
         building_row.get("wkt")
         or building_row.get("geom_wkt")
@@ -174,7 +169,7 @@ def write_candidates_json(building_row, best_place, saved, out_dir=None):
         "wkt": str(building_wkt),
     }
 
-    # ---------- place (optional) ----------
+    # place
     place_rec = None
     if best_place:
         place_rec = {
@@ -187,7 +182,7 @@ def write_candidates_json(building_row, best_place, saved, out_dir=None):
             "dist_m": float(best_place.get("dist_m", 0.0)),
         }
 
-    # ---------- images ----------
+
     images_out = []
     # we’ll use the building center as a hard fallback to avoid nulls
     b_lon, b_lat = float(building_rec["lon"]), float(building_rec["lat"])
@@ -202,17 +197,17 @@ def write_candidates_json(building_row, best_place, saved, out_dir=None):
         images_out.append({
             "id": r.get("id"),
             "path": img_path,
-            "coordinates": [lon, lat],               # always numbers now
+            "coordinates": [lon, lat],
             "compass_angle": r.get("compass_angle"),
             "camera_type": r.get("camera_type"),
             "captured_at": r.get("captured_at"),
             "slice_index": r.get("slice_index"),
         })
-    # ---------- polygon + walls ----------
-    polygon_xy = polygon_vertices_from_wkt(building_wkt, drop_last=True)   # [[lon,lat], ...]
-    walls = polygon_walls_from_wkt(building_wkt)                           # [[[lon,lat],[lon,lat]], ...]
+    # polygon + walls
+    polygon_xy = polygon_vertices_from_wkt(building_wkt, drop_last=True)
+    walls = polygon_walls_from_wkt(building_wkt)
 
-    # ---------- write JSON ----------
+    # write JSON
     record = {
         "building": building_rec,
         "place": place_rec,
@@ -224,22 +219,22 @@ def write_candidates_json(building_row, best_place, saved, out_dir=None):
     out_path = os.path.join(out_dir, "candidates.json")
     with open(out_path, "w") as f:
         json.dump(record, f, indent=2)
-    print(f"  ✓ wrote {out_path}", flush=True)
+    print(f"wrote {out_path}", flush=True)
 
-    # ---------- build Evan-friendly return value ----------
-    # Evan image dicts: {"image_path": <jpg>, "compass_angle": <float>, "coordinates": [lon,lat]}
-    evan_images = []
+
+    # image dicts: {"image_path": <jpg>, "compass_angle": <float>, "coordinates": [lon,lat]}
+    image_dicts = []
     for r in images_out:
         if not r.get("path"):
             continue
-        evan_images.append({
+        image_dicts.append({
             "image_path": r["path"],
             "compass_angle": r.get("compass_angle"),
             "coordinates": r.get("coordinates"),  # [lon,lat]
         })
 
     pairs = []
-    for img in evan_images:
+    for img in image_dicts:
         for wall in walls:
             pairs.append((img, wall))
 

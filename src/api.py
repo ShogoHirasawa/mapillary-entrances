@@ -9,7 +9,7 @@ PYTHONPATH=. python3 - <<'PY'
 from src.api import get_building_package_for_point
 lat, lon = 37.789606, -122.396844   # Salesforce Tower
 pkg = get_building_package_for_point(lat, lon)
-print("✅", pkg["building_id"], "images:", len(pkg["evan_images"]))
+print("✅", pkg["building_id"], "images:", len(pkg["images"]))
 print("Sample wall:", pkg["walls"][0])
 PY 
 """
@@ -28,7 +28,7 @@ from .imagery import fetch_and_slice_for_building, write_candidates_json
 from .sources import resolve_sources
 
 def _point_bbox(lon: float, lat: float, meters: float = 80.0) -> Dict[str, float]:
-    # simple meters→deg approximation for small areas
+    # simple meters to deg approximation for small areas
     dy = meters / 111_320.0
     dx = meters / (111_320.0 * math.cos(math.radians(lat)))
     return {"xmin": lon - dx, "ymin": lat - dy, "xmax": lon + dx, "ymax": lat + dy}
@@ -56,7 +56,7 @@ def get_building_package_for_point(
     Single-point adapter for inference.py:
       - picks nearest building to (lat,lon)
       - joins places & selects best single place
-      - fetches/slices imagery (returns Evan schema)
+      - fetches/slices imagery
       - returns polygon [[lon,lat], ...] and wall segments [[lon,lat], [lon,lat]]...
     """
     # get nearest building
@@ -97,9 +97,9 @@ def get_building_package_for_point(
             walls.append([a, bpt])
 
     # build list to be used in inference.py
-    evan_images: List[Dict[str, Any]] = []
+    image_data: List[Dict[str, Any]] = []
     for rec in saved:
-        evan_images.append({
+        image_data.append({
             "image_path": rec.get("path") or rec.get("jpg_path"),
             "compass_angle": rec["compass_angle"],
             "coordinates": (
@@ -117,7 +117,7 @@ def get_building_package_for_point(
         "polygon": polygon, # [[lon,lat], ...]
         "walls": walls, # [ [[lon,lat],[lon,lat]], ...]
         "place": best_place or None,
-        "evan_images": evan_images,
+        "image_path": image_data,
         "pairs": pairs,  # [{jpg: json}, ...]
     }
 

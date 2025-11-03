@@ -1,11 +1,9 @@
 import math
-import os
-import json
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
 import cv2
-from api import get_building_package_for_point
+import pyproj
 
 try:
     from ultralytics import YOLO
@@ -16,26 +14,17 @@ except Exception:
 #----------------------------------
 # Basic helper functions
 
-# Estimate of earth radius in metres
-R_EARTH = 6378137.0
+# shared local projection utilities
+def make_local_proj(lat0: float, lon0: float):
+    # create a local Azimuthal Equidistant projection centered at (lat0, lon0)
+    return pyproj.Proj(proj="aeqd", lat_0=lat0, lon_0=lon0,
+                       ellps="WGS84", units="m")
 
-# 2D Approximation of area, since distances are small enough where Earth curvature is negligible
-# We treat the building (places dataset) as the center (x=0,y=0)
-# All other points (wall points, camera) will be in reference to the building
-def to_xy(lat, lon, lat0, lon0):
-    lat, lon, lat0, lon0 = map(math.radians, (lat, lon, lat0, lon0))
-    x = (lon - lon0) * math.cos((lat + lat0)/2.0) * R_EARTH
-    y = (lat - lat0) * R_EARTH
+def to_local_xy(lat: float, lon: float, proj_local):
+    # convert (lat, lon) to local (x, y) meters using the provided projection
+    transformer = pyproj.Transformer.from_crs("EPSG:4326", proj_local, always_xy=True)
+    x, y = transformer.transform(lon, lat)
     return np.array([x, y], dtype=float)
-
-
-# convert xy back to lat/lon
-def to_lat_lon_xy(xy, lat0, lon0):
-    x, y = float(xy[0]), float(xy[1])
-    lat0r, lon0r = math.radians(lat0), math.radians(lon0)
-    lat = y / R_EARTH + lat0r
-    lon = x / (R_EARTH * math.cos((lat + lat0r) * 0.5)) + lon0r
-    return math.degrees(lat), math.degrees(lon) 
 
 
 # ----------------------------------
@@ -193,7 +182,7 @@ def nearest_point_on_segment(C, A, B):
     E = A + t * AB
     return E
 
-#Used for difference between compas angle and wall normal vector
+# used for difference between compas angle and wall normal vector
 def angular_difference(a,b):
     return abs((a - b + 180) % 360 - 180)
 
@@ -218,31 +207,29 @@ def outward_normal(A, B, G, E):
 def image_points_toward_wall(
     cam_lat, cam_lon, cam_bearing_deg,
     edge1_lat, edge1_lon, edge2_lat, edge2_lon,
-    centroid_lat, centroid_lon,
-    fov_half_angle_deg=40.0
+    centroid_lat, centroid_lon, proj_local,
+    fov_half_angle_deg=45.0
 ) -> tuple[bool, dict]:
     """
-    Returns (keep:boolean, info:dict with delta, frontness, score).
+    Determine if a camera image points toward a wall segment, using consistent
+    local projection geometry (same as extract_bbox_coordinates).
     """
+    # convert all points to local (meters)
+    C = to_local_xy(cam_lat, cam_lon, proj_local)
+    A = to_local_xy(edge1_lat, edge1_lon, proj_local)
+    B = to_local_xy(edge2_lat, edge2_lon, proj_local)
+    G = to_local_xy(centroid_lat, centroid_lon, proj_local)
 
-    lat0, lon0 = centroid_lat, centroid_lon
-    # Places dataset - specific building centerpoint as reference
-
-    C = to_xy(cam_lat, cam_lon, lat0, lon0)
-    A = to_xy(edge1_lat, edge1_lon, lat0, lon0)
-    B = to_xy(edge2_lat, edge2_lon, lat0, lon0)
-
-    # nearest point on wall to camera
+    # nearest point and vector math identical
     E = nearest_point_on_segment(C, A, B)
-
-    # facing: bearing(C->E) vs camera_bearing
     v = E - C
+
+    # bearing from camera to wall
     bearing_cam_to_wall = (math.degrees(math.atan2(v[0], v[1])) + 360) % 360
     delta = angular_difference(bearing_cam_to_wall, cam_bearing_deg)
     facing_ok = (delta <= fov_half_angle_deg)
 
-    # if dot product between normal and camera to wall point is positive, the camera is facing the correct way
-    G = to_xy(centroid_lat, centroid_lon, lat0, lon0)
+    # outward normal, frontness same as before
     n_hat = outward_normal(A, B, G, E)
     frontness = float(n_hat @ (C - E))
     front_ok = (frontness > 0)
@@ -257,8 +244,8 @@ def image_points_toward_wall(
         "score": float(score)
     }
 
-#--------------------------------------
 
+#--------------------------------------
 
 
 
@@ -388,7 +375,7 @@ def validate_folder_with_seg_and_yolo(
     print(f"[{p.name}] facade_presence_score={facade_score:.3f}  ROIs={len(rois)}")
 
     if facade_score < facade_tau:
-        print("  -> rejected (low façade score)")
+        print("rejected (low facade score)")
         continue
     '''
     #if use_rois and rois:
@@ -398,7 +385,7 @@ def validate_folder_with_seg_and_yolo(
     # Keep only door class if model has multiple classes; otherwise keep all
     door_dets = [d for d in dets if d.get("cls_name", "").lower().find("door") != -1 or True]
 
-    print(f"  -> detections: {len(door_dets)}")
+    print(f"detections: {len(door_dets)}")
     #assume for now there will only be one door detection in an image
 
     if save_vis_dir:
@@ -434,7 +421,7 @@ def intersect_ray_segment(ray_origin, direction, A, B):
     rhs = (A - ray_origin)
     det = M[0,0]*M[1,1] - M[0,1]*M[1,0]
 
-    if abs(det) < 1e-9: #no intersection point
+    if abs(det) < 1e-9: # no intersection point
         return None, False
     inv = np.array([[ M[1,1], -M[0,1] ],
                     [ -M[1,0], M[0,0] ]]) / det
@@ -468,136 +455,104 @@ def bbox_bottom_center_xy(bbox_xywh, img_w, img_h):
     return float(u), float(v)
 
 
-def find_entrance_point(
-    bbox_xywh, img_w, img_h,
-    cam_lat, cam_lon, cam_bearing_deg,
-    A_lat, A_lon, B_lat, B_lon,
-    lat0, lon0,
-    hfov_deg=70.0
-):
-    """
-    Map bottom-center of a detected door bbox (entrance point) to a lat/lon on the given wall segment.
-    """
-    # local XY for camera & wall endpoints
-    C = to_xy(cam_lat, cam_lon, lat0, lon0)
-    A = to_xy(A_lat, A_lon, lat0, lon0)
-    B = to_xy(B_lat, B_lon, lat0, lon0)
-
-    # door pixel horizontal offset => yaw offset from camera bearing
-    u, _v = bbox_bottom_center_xy(bbox_xywh, img_w, img_h)
-    fx = horizontal_fov_to_fx(img_w, hfov_deg)
-    yaw_off_deg = pixel_to_yaw_offset_deg(u, img_w, fx)
-
-    # world yaw = camera bearing + pixel yaw offset
-    world_yaw_deg = (cam_bearing_deg + yaw_off_deg) % 360.0
-    # direction vector in XY (0° = North -> +Y)
-    theta = (math.pi*world_yaw_deg)/180
-    d = np.array([ math.sin(theta), math.cos(theta) ], dtype=float)  # x=sin, y=cos (bearing convention)
-
-    # intersect camera ray with wall segment
-    hit, ok = intersect_ray_segment(C, d, A, B)
-
-    # fallback if miss: nearest point on wall to the ray origin projected along ray
-    if not ok:
-        # Project camera->nearest point on wall (orthogonal projection to segment)
-        E, _ = nearest_point_on_segment(C, A, B)
-        hit = E
-
-    # convert back to lat/lon
-    return to_lat_lon_xy(hit, lat0, lon0)
-
-
-
 # given entrance bbox from model, convert center floor point (entrance) to lat/lon
 # yolo bbox format is: [class_id x_center y_center width height]  (often normalized)
-def extract_bbox_coordinates(image_dict, wall_AB_latlon, 
-                            centroid_lat, centroid_lon, 
-                            hfov_deg=70.0):
+
+def extract_bbox_coordinates(
+    image_dict: Dict,
+    wall_AB_latlon: Tuple[float, float, float, float],
+    centroid_lat: float,
+    centroid_lon: float,
+    hfov_deg: float = 45.0
+) -> Tuple[float, float]:
     """
-    image_dict = {"image_path": ./img, "compass_angle": angle, "coordinates": [lat,lon], "entrance_bbox": [(x1,y1,x2,y2)]}
-    wall_AB_latlon: (A_lat, A_lon, B_lat, B_lon)
-    cam_meta_by_image: dict[image_id] -> { 'lat':..., 'lon':..., 'bearing':..., 'img_w':..., 'img_h':... }
-    Returns: (building_label, (avg_lat, avg_lon))
+    Compute the geographic (lat, lon) of a detected entrance from a YOLO bbox,
+    reusing geometric helper functions for clarity and consistency.
     """
+
+    # parse inputs
     A_lat, A_lon, B_lat, B_lon = wall_AB_latlon
-    cam_lat, cam_lon = image_dict["coordinates"][0], image_dict["coordinates"][1]
-    cam_bearing = image_dict['compass angle']
+    cam_lat, cam_lon = image_dict["coordinates"]
+    cam_bearing_deg = image_dict["compass_angle"]
+    bbox = image_dict["bbox"]
+
+    # load image to get size
     img = cv2.imread(image_dict["image_path"])
+    if img is None:
+        raise FileNotFoundError(f"Could not read {image_dict['image_path']}")
     img_h, img_w = img.shape[:2]
-    bbox = image_dict["entrance_bbox"]
 
-    xywh = bbox[1:5]
-    lat, lon = find_entrance_point(
-        xywh, img_w, img_h,
-        cam_lat, cam_lon, cam_bearing,
-        A_lat, A_lon, B_lat, B_lon,
-        centroid_lat, centroid_lon,
-        hfov_deg)
+    # compute bottom-center pixel of bbox
+    x1, y1, x2, y2 = bbox
+    # normalize
+    bbox_xywh = [
+        (x1 + x2) / 2.0 / img_w,
+        (y1 + y2) / 2.0 / img_h,
+        (x2 - x1) / img_w,
+        (y2 - y1) / img_h
+    ]
+    u, _ = bbox_bottom_center_xy(bbox_xywh, img_w, img_h)
+
+    # convert pixel offset to world yaw
+    fx = horizontal_fov_to_fx(img_w, hfov_deg)
+    yaw_off_deg = pixel_to_yaw_offset_deg(u, img_w, fx)
+    world_yaw_deg = (cam_bearing_deg + yaw_off_deg) % 360.0
+    theta = math.radians(world_yaw_deg)
+    d = np.array([math.sin(theta), math.cos(theta)], dtype=float)
+
+    # local projection (Azimuthal Equidistant around building centroid)
+    proj_local = pyproj.Proj(
+        proj="aeqd", lat_0=centroid_lat, lon_0=centroid_lon,
+        ellps="WGS84", units="m"
+    )
+    to_local = pyproj.Transformer.from_crs("EPSG:4326", proj_local, always_xy=True)
+    to_geo = pyproj.Transformer.from_crs(proj_local, "EPSG:4326", always_xy=True)
+
+    # convert to local XY coordinates
+    Cx, Cy = to_local.transform(cam_lon, cam_lat)
+    Ax, Ay = to_local.transform(A_lon, A_lat)
+    Bx, By = to_local.transform(B_lon, B_lat)
+    C, A, B = np.array([Cx, Cy]), np.array([Ax, Ay]), np.array([Bx, By])
+
+    # ray–segment intersection
+    hit, ok = intersect_ray_segment(C, d, A, B)
+    if not ok:
+        hit, _ = nearest_point_on_segment(C, A, B)
+
+    # convert back to geographic coordinates
+    lon_e, lat_e = to_geo.transform(hit[0], hit[1])
+    return float(lat_e), float(lon_e)
+
+
+def run_inference(data, fov_half_angle, 
+                  yolo_weights, facade_tau, use_rois, 
+                  conf, iou, device, save_vis):
     
-    if not lat or not lon:
-        return None
-    
-    entrance = [lat, lon]
-
-    entrance = np.array(entrance, dtype=float)
-    return entrance
-
-
-
-
-#----------------------------------
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Mini validation: segmentation + YOLO door detection")
-    parser.add_argument("--coordinates", type = str, required = True, help = "Reference coordinates to check")
-    parser.add_argument("--yolo_weights", type=str, required=True, help="Path to YOLOv8 door weights (.pt)")
-    parser.add_argument("--device", type=str, default=None, help="e.g., 'cpu' or 'cuda:0'")
-    parser.add_argument("--save_vis", type=str, default=None, help="Folder to save visualization outputs")
-    parser.add_argument("--use_rois", type=bool, default=False, help="Run YOLO on full image instead of ROI crops")
-    parser.add_argument("--facade_tau", type=float, default=0.01, help="Façade presence threshold [0..1]")
-    parser.add_argument("--conf", type=float, default=0.35, help="YOLO confidence threshold")
-    parser.add_argument("--iou", type=float, default=0.5, help="YOLO NMS IOU threshold")
-    parser.add_argument("--search_building_radius", type=int, default=120, help="Radius threshold for finding potential buildings")
-    parser.add_argument("--search_place_radius", type=int, default=60, help="Radius threshold for matching building and place")
-    parser.add_argument("--limit-buildings", type=int, default=10, help="Maximum number of potential buildings")
-    parser.add_argument("--max_images_per_building", type=int, default=8, help="Maximum number of images per building")
-    parser.add_argument("--min-capture-date", type=str, default=None, help="Minimum data of data release")
-    parser.add_argument("--use_fov", type=bool, default=True, help="Use field of view")
-    parser.add_argument("--prefer_360", type=bool, default=True, help="Prefer to use 360 degree imagery from Mapillary")
-    parser.add_argument("--fov_half_angle", type=float, default=25.0, help="Field of view half angle")
-    parser.add_argument("--src_mode", choices=["auto","local","s3"], default="auto", help="Prefer local files")
-    args = parser.parse_args()
+    # data will be dictionary returned from api.py get_building_package_for_point
 
     if not _HAS_ULTRALYTICS:
         raise SystemExit("ERROR: ultralytics not installed. Try: pip install ultralytics")
 
-    lat, lon = args.coordinates.split(" ")
-    data = get_building_package_for_point(lat, lon, args.search_building_radius, 
-                                            args.search_place_radius, args.max_images_per_building, 
-                                            args.min_capture_date, args.prefer_360, args.fov_half_angle, 
-                                            args.apply_fov, args.src_mode)
-    
     building_id = data["building_id"]
     centroid_lat, centroid_lon = data["building_center"][0], data["building_center"][1]
-    all_images = data["images_dict"]
+    all_images = data["image_dicts"]
     place = data["place"]
     if place is None:
         print("No matching place found")
     wall_points_lat_lon = data["walls"]
-  
-    # all_images -> [ {"image_path": ./img, "compass_angle": angle, "coordinates": [lat,lon]}, {...} ]
+
+    # all_images : [ {"image_path": ./img, "compass_angle": angle, "coordinates": [lat,lon]}, {...} ]
     all_images = filter_images_by_quality(all_images, sharpness_thresh = 100.0, 
-                                          min_width = 300, min_height= 300, 
-                                          dark_thresh = 0.05, bright_thresh = 0.95)
+                                        min_width = 300, min_height= 300, 
+                                        dark_thresh = 0.05, bright_thresh = 0.95)
 
     # Main Loop:
     # Filter candidate images to point at current wall 
     # Run loop until entrance has been found
     # Edge case to consider: finding an entrance on multiple walls
-    
-    #make iterate two at a time
+
     potential_entrance = None
+    proj_local = make_local_proj(centroid_lat, centroid_lon)
     for wall in wall_points_lat_lon:
         edge1_lat, edge1_lon, edge2_lat, edge2_lon = wall[0][0], wall[0][1], wall[1][0], wall[1][1]
         max_frontness = 0
@@ -605,33 +560,28 @@ if __name__ == "__main__":
         for img in all_images:
             cam_lat, cam_lon, cam_bearing_deg = img["coordinates"][0], img["coordinates"][1], img["compass_angle"]
             check, img_scores = image_points_toward_wall(
-                cam_lat, cam_lon, cam_bearing_deg,
-                edge1_lat, edge1_lon, edge2_lat, edge2_lon,
-                centroid_lat, centroid_lon,
-                args.fov_half_angle_deg)
+                                cam_lat, cam_lon, cam_bearing_deg,
+                                edge1_lat, edge1_lon, edge2_lat, edge2_lon,
+                                centroid_lat, centroid_lon,
+                                proj_local, fov_half_angle
+                                )
             if check:
                 if img_scores["frontness"] > max_frontness:
                     max_frontness = img_scores["frontness"]
                     best_img = img
                     best_wall = wall
 
-        #no images facing towards wall so move to next wall
+        # no images facing towards wall so move to next wall
         if len(best_img) == 0:
             continue
 
-        #best_img = {"image_path": ./img, "compass_angle": angle, "coordinates": [lat,lon]}
+        # best_img = {"image_path": ./img, "compass_angle": angle, "coordinates": [lat,lon]}
     
         # I'm going to ignore multiple entrance points edge case for now and stop when one is found
-        detection = (validate_folder_with_seg_and_yolo(
-            best_img['image_path'],
-            yolo_weights_path=args.yolo_weights,
-            facade_tau=args.facade_tau,
-            use_rois=(args.use_rois),
-            conf_thr=args.conf,
-            iou_thr=args.iou,
-            device=args.device,
-            save_vis_dir=args.save_vis
-        ))
+        detection = validate_folder_with_seg_and_yolo(
+                    best_img['image_path'], yolo_weights,
+                    facade_tau, use_rois, conf, iou, device, save_vis)
+        
         if detection is not None:
             # found a entrance so end loop and extract entrance
             break
@@ -642,5 +592,5 @@ if __name__ == "__main__":
         best_img["bbox"] = detection #detection is (x1, y1, x2, y2)
         wall_tuple = (best_wall[0][0], best_wall[0][1], best_wall[1][0], best_wall[1][1])
         entrance_point = extract_bbox_coordinates(best_img, wall_tuple,
-                            centroid_lat, centroid_lon, hfov_deg=70.0)
+                            centroid_lat, centroid_lon, hfov_deg=45.0)
         print(f"Entrance Found at ({entrance_point[0]}, {entrance_point[1]})")
