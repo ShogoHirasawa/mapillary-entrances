@@ -57,7 +57,7 @@ def main():
         bt = time.perf_counter()
         print(f"[building {i}/{len(bdf)}] id={b['id']} @ ({b['lat']:.6f},{b['lon']:.6f})")
         b_links = links[links["building_id"] == b["id"]] if not links.empty else pd.DataFrame()
-        best_place = select_best_place_for_building(b_links, building_id=b["id"], max_dist_m=60)
+        best_place = select_best_place_for_building(b_links, building_id=b["id"], max_dist_m=60, hard_max_dist_m=args.place_radius_m)
         if best_place:
             nm = best_place.get("name") or "<unnamed>"
             d  = best_place.get("dist_m")
