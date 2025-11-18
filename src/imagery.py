@@ -5,8 +5,7 @@ import json
 import time
 from pathlib import Path
 from typing import Optional, List, Dict
-from .utils import *
-from .pano_slices import slice_equirectangular
+from .utils import _is_360, fetch_images, download_image, tlog, polygon_vertices_from_wkt, polygon_walls_from_wkt
 
 def _ensure_dir(path: Path):
     # create directory if it doesn't exist
@@ -17,13 +16,11 @@ def fetch_and_slice_for_building(
     building_row,
     radius_m: int,
     min_capture_date: Optional[str],
-    apply_fov: bool,
     max_images_per_building: int,
     prefer_360: bool,
-    fov_half_angle: float,
 ) -> List[Dict]:
     """
-    Fetch Mapillary images near a building centroid and optionally slice panoramas.
+    Fetch Mapillary images near a centroid and optionally slice panoramas.
     Returns list of metadata dicts (and saves images locally).
     """
     lat, lon = building_row["lat"], building_row["lon"]
@@ -74,9 +71,10 @@ def fetch_and_slice_for_building(
             "coordinates": img.get("computed_geometry", {}).get("coordinates"),
             "compass_angle": img.get("compass_angle"),
             "camera_type": img.get("camera_type"),
+            "is_360": _is_360(img),
             "captured_at": img.get("captured_at"),
         })
-
+    '''
     # slice panoramas if enabled
     if prefer_360:
         n_before = len(saved)
@@ -84,7 +82,7 @@ def fetch_and_slice_for_building(
         print(f"Building {building_id} ({n_before} originals, {len(saved)} kept 360-slices)")
     else:
         print(f"Building {building_id} ({len(saved)} images)")
-
+    '''
     tlog("Building done", t0)
     return saved
 
@@ -126,7 +124,7 @@ def _extract_lon_lat(rec, fallback_lon, fallback_lat):
 
 def write_candidates_json(building_row, best_place, saved, out_dir=None):
     """
-    Write candidates.json for a building and return [(evan_image_dict, wall_pair), ...].
+    Write candidates.json for a building and return [(image_dict, wall_pair), ...].
 
     - building_row: pandas Series with at least id, lat, lon, wkt
     - best_place: dict or None
@@ -200,6 +198,7 @@ def write_candidates_json(building_row, best_place, saved, out_dir=None):
             "coordinates": [lon, lat],
             "compass_angle": r.get("compass_angle"),
             "camera_type": r.get("camera_type"),
+            "is_360": r.get("is_360", False),
             "captured_at": r.get("captured_at"),
             "slice_index": r.get("slice_index"),
         })

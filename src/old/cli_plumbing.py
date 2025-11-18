@@ -29,7 +29,7 @@ def main():
     ap.add_argument("--limit-buildings", type=int, default=10)
     ap.add_argument("--max-images-per-building", type=int, default=8)
     ap.add_argument("--min-capture-date", type=str, default=None)
-    ap.add_argument("--no-fov", action="store_true")
+    # Note: FOV filtering is now automatic based on is_360 metadata (360° images skip strict FOV)
     ap.add_argument("--prefer-360", action="store_true")
     ap.add_argument("--fov-half-angle", type=float, default=45.0)
     ap.add_argument("--src-mode", choices=["auto","local","s3"], default="auto")
@@ -70,7 +70,7 @@ def main():
 
         saved = fetch_and_slice_for_building(
             b, radius_m=args.radius_m, min_capture_date=args.min_capture_date,
-            apply_fov=not args.no_fov, max_images_per_building=args.max_images_per_building,
+            max_images_per_building=args.max_images_per_building,
             prefer_360=args.prefer_360, fov_half_angle=args.fov_half_angle,
         )
         write_candidates_json(b, best_place, saved)

@@ -5,8 +5,8 @@ from pathlib import Path
 
 RELEASE = "2025-09-24.0"
 
-LOCAL_BUILDINGS = Path("data/buildings_soma.parquet")
-LOCAL_PLACES    = Path("data/places_soma.parquet")
+LOCAL_BUILDINGS = Path("data/buildings_local.parquet")
+LOCAL_PLACES    = Path("data/places_local.parquet")
 
 BUILDINGS_SRC = str(LOCAL_BUILDINGS) if LOCAL_BUILDINGS.exists() else \
     f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=buildings/type=building/*"

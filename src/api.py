@@ -1,18 +1,9 @@
 # --- new file: src/api.py ---
-# interface for single building near a (lat, lon) point. uses same pipeline
+# interface for buildings/images/places near a (lat, lon) point. uses same pipeline
 # pieces but returns results in-memory as a dict 
 
 # example usage
 
-"""
-PYTHONPATH=. python3 - <<'PY'
-from src.api import get_building_package_for_point
-lat, lon = 37.789606, -122.396844   # Salesforce Tower
-pkg = get_building_package_for_point(lat, lon)
-print("✅", pkg["building_id"], "images:", len(pkg["images"]))
-print("Sample wall:", pkg["walls"][0])
-PY 
-"""
 
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,7 +15,7 @@ from .utils import polygon_vertices_from_wkt
 from .buildings import get_buildings
 from .places import join_buildings_places
 from .selection import select_best_place_for_building
-from .imagery import fetch_and_slice_for_building, write_candidates_json
+from .imagery import fetch_and_slice_for_building, _extract_lon_lat
 from .sources import resolve_sources
 
 def _point_bbox(lon: float, lat: float, meters: float = 80.0) -> Dict[str, float]:
@@ -39,84 +30,121 @@ def _nearest_building(bdf: pd.DataFrame, lat: float, lon: float) -> pd.Series:
     d2 = (bdf["lat"] - lat)**2 + (bdf["lon"] - lon)**2
     return bdf.loc[d2.idxmin()]
 
-def get_building_package_for_point(
+def get_buildings_and_imagery_in_radius(
     lat: float,
     lon: float,
     search_radius_m: int,
     place_radius_m: int,
-    max_images_per_building: int,
+    max_images_total: int,
     min_capture_date: Optional[str],
     prefer_360: bool,
-    fov_half_angle: float,
-    apply_fov: bool,
     src_mode: str,
 ) -> Dict[str, Any]:
     """
-    Single-point adapter for inference.py:
-      - picks nearest building to (lat,lon)
-      - joins places & selects best single place
-      - fetches/slices imagery
-      - returns polygon [[lon,lat], ...] and wall segments [[lon,lat], [lon,lat]]...
+    Multi-building + shared imagery adapter for inference.py
+
+    - Finds *all* buildings within search_radius_m of (lat, lon)
+    - Joins each with its best nearby place (optional)
+    - Fetches a *single shared* imagery set centered on (lat, lon)
+    - Returns:
+        {
+          "input_coordinates": [lon, lat],
+          "building_polygons": {building_id: [[lon,lat], ...], ...},
+          "building_walls": {building_id: [[[lon,lat],[lon,lat]], ...], ...},
+          "places": {building_id: place_info or None, ...},
+          "image_dicts": [ {...}, {...}, ... ]   # all images in radius
+        }
     """
-    # get nearest building
-    bbox_small = _point_bbox(lon, lat, meters=search_radius_m)
-    b_src, p_src = resolve_sources(bbox_small, src_mode)
-    bdf = get_buildings(bbox_small, b_src, limit_hint=50)
-    b = _nearest_building(bdf, lat, lon)
 
-    # join building with place data 
-    links = join_buildings_places(bdf, bbox_small, p_src, radius_m=place_radius_m)
-    best_place = select_best_place_for_building(
-        links[links["building_id"] == b["id"]],
-        building_id=b["id"],
-        max_dist_m=place_radius_m
-    )
+    # define bounding box and load building and place data
+    bbox = _point_bbox(lon, lat, meters=search_radius_m)
+    b_src, p_src = resolve_sources(bbox, src_mode)
+    bdf = get_buildings(bbox, b_src, limit_hint=200)
+    if bdf is None or len(bdf) == 0:
+        print("[WARN] No buildings found in radius.")
+        return {
+            "input_coordinates": [lon, lat],
+            "building_polygons": {},
+            "building_walls": {},
+            "places": {},
+            "image_dicts": []
+        }
 
-    # imagery (returns detailed saved records)
-    saved = fetch_and_slice_for_building(
-        b,
-        radius_m=search_radius_m,
-        min_capture_date=min_capture_date,
-        apply_fov=apply_fov,
-        max_images_per_building=max_images_per_building,
-        prefer_360=prefer_360,
-        fov_half_angle=fov_half_angle,
-    )
+    print(f"[INFO] Found {len(bdf)} buildings within {search_radius_m} m")
 
-    # write candidates.json (also returns jpg→json list)
-    pairs = write_candidates_json(b, best_place, saved)
+    # join once with places
+    links = join_buildings_places(bdf, bbox, p_src, radius_m=place_radius_m)
 
-    # polygon + simple wall segments (edges of the exterior ring)
-    polygon = polygon_vertices_from_wkt(b["wkt"])  # [[lon,lat], ...]
-    walls: List[List[List[float]]] = []
-    if len(polygon) >= 2:
-        for i in range(len(polygon)):
-            a = polygon[i]
-            bpt = polygon[(i + 1) % len(polygon)]
-            walls.append([a, bpt])
+    building_polygons = {}
+    building_walls = {}
+    building_places = {}
 
-    # build list to be used in inference.py
-    image_data: List[Dict[str, Any]] = []
-    for rec in saved:
-        image_data.append({
-            "image_path": rec.get("path") or rec.get("jpg_path"),
-            "compass_angle": rec["compass_angle"],
-            "coordinates": (
-                rec.get("coordinates")
-                or (rec.get("computed_geometry", {}).get("coordinates")
-                    if isinstance(rec.get("computed_geometry"), dict) else None)
-                or [rec.get("lon"), rec.get("lat")]
-            ),
+    for _, b in bdf.iterrows():
+        bid = b["id"]
 
-        })
+        # polygon + wall segments
+        polygon = polygon_vertices_from_wkt(b["wkt"])  # [[lon,lat], ...]
+        building_polygons[bid] = polygon
 
-    return {
-        "building_id": b["id"],
-        "building_center": [float(b["lat"]), float(b["lon"])],
-        "polygon": polygon, # [[lon,lat], ...]
-        "walls": walls, # [ [[lon,lat],[lon,lat]], ...]
-        "place": best_place or None,
-        "image_path": image_data,
-        "pairs": pairs,  # [{jpg: json}, ...]
+        walls = []
+        if len(polygon) >= 2:
+            for i in range(len(polygon)):
+                a = polygon[i]
+                bpt = polygon[(i + 1) % len(polygon)]
+                walls.append([a, bpt])
+        building_walls[bid] = walls
+
+        # best place (if any)
+        best_place = None
+        if "building_id" in links.columns:
+            subset = links[links["building_id"] == bid]
+            if len(subset) > 0:
+                best_place = select_best_place_for_building(
+                    subset,
+                    building_id=bid,
+                    max_dist_m=place_radius_m,
+                )
+        building_places[bid] = best_place or None
+
+    # fetch imagery *once* for the entire area around (lat, lon)
+    print(f"[INFO] Fetching imagery around ({lat:.6f}, {lon:.6f}) within {search_radius_m} m")
+
+    temp_building = {
+        "id": "shared_area",
+        "lat": lat,
+        "lon": lon,
+        "wkt": None, # unused
     }
 
+    saved = fetch_and_slice_for_building(
+        temp_building,
+        radius_m=search_radius_m,
+        min_capture_date=min_capture_date,
+        max_images_per_building=max_images_total,
+        prefer_360=prefer_360,
+    )
+
+    if not saved:
+        print("[WARN] No imagery fetched for area.")
+        saved = []
+
+    # build unified image metadata list
+    image_data: List[Dict[str, Any]] = []
+    for rec in saved:
+        lon_rec, lat_rec = _extract_lon_lat(rec, lon, lat)
+        image_data.append({
+            "image_path": rec.get("path") or rec.get("jpg_path"),
+            "compass_angle": rec.get("compass_angle"),
+            "coordinates": [lon_rec, lat_rec],
+            "is_360": rec.get("is_360", False),
+            "camera_type": rec.get("camera_type"),
+        })
+
+    # return unified dictionary
+    return {
+        "input_coordinates": [lon, lat],
+        "building_polygons": building_polygons,
+        "building_walls": building_walls,
+        "places": building_places,
+        "image_dicts": image_data,
+    }

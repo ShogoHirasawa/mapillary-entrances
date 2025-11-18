@@ -74,6 +74,7 @@ def _bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     y = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlambda)
     bearing = math.degrees(math.atan2(x, y))
     return (bearing + 360) % 360
+
 def _is_360(img: dict) -> bool:
     ct = (img.get("camera_type") or "").lower()
     return ct in {"spherical", "equirectangular", "panorama", "panoramic", "360"}
@@ -144,7 +145,7 @@ def fetch_images(
     in_radius = [img for img in in_radius if (img.get('camera_type') or '').lower() != 'fisheye']
     filtered_count = initial_count - len(in_radius)
     if filtered_count > 0:
-        print(f"  [mly_utils] {filtered_count} fisheye images filtered out. {len(in_radius)} remaining.")
+        print(f"  [utils] {filtered_count} fisheye images filtered out. {len(in_radius)} remaining.")
     # Prefer 360° images if available
     if prefer_360:
         only_360 = [i for i in in_radius if _is_360(i)]
@@ -166,9 +167,9 @@ def fetch_images(
         
         filtered_count = initial_image_count - len(dated_images)
         if filtered_count > 0:
-            print(f"  [mly_utils] {filtered_count} images filtered out by min_capture_date ({min_capture_date_filter.strftime('%Y-%m-%d')}). {len(dated_images)} remaining.")
+            print(f"  [utils] {filtered_count} images filtered out by min_capture_date ({min_capture_date_filter.strftime('%Y-%m-%d')}). {len(dated_images)} remaining.")
         elif initial_image_count > 0: # Only print if there were images to begin with
-            print(f"  [mly_utils] No images filtered by min_capture_date ({min_capture_date_filter.strftime('%Y-%m-%d')}).")
+            print(f"  [utils] No images filtered by min_capture_date ({min_capture_date_filter.strftime('%Y-%m-%d')}).")
         in_radius = dated_images # Update in_radius with date-filtered images
 
     return in_radius
@@ -194,71 +195,6 @@ def filter_images_fov(
             img["angle_diff"] = diff
             passing.append(img)
     return passing
-
-# ── OSRM (ROUTING) HELPERS ────────────────────────────────────────────────────
-def snap_to_street(lat: float, lon: float) -> Tuple[float, float]:
-    """Return the (lat, lon) of the nearest road centre-line using OSRM's *nearest* service.
-    Falls back to the original coordinate if the service fails.
-    """
-    try:
-        url = f"https://router.project-osrm.org/nearest/v1/driving/{lon},{lat}?number=1"
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        js = r.json()
-        loc = js["waypoints"][0]["location"]  # [lon, lat]
-        return loc[1], loc[0]
-    except Exception as exc:
-        print(f"[WARN] snap_to_street failed: {exc} – using original coordinate")
-        return lat, lon
-
-# ── IMAGE QUALITY HEURISTICS ────────────────────────────────────────────────
-def is_sharp(img: np.ndarray, thresh: float = 100.0) -> bool:
-    """Check image sharpness using the variance of the Laplacian."""
-    if img.ndim > 2:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    return cv2.Laplacian(img, cv2.CV_64F).var() > thresh
-
-def has_enough_resolution(img: np.ndarray, min_width: int = 300, min_height: int = 300) -> bool:
-    """Check if image meets minimum width and height requirements."""
-    h, w = img.shape[:2]
-    return (w >= min_width) and (h >= min_height)
-
-def is_well_exposed(img: np.ndarray, dark_thresh: float = 0.05, bright_thresh: float = 0.95) -> bool:
-    """Check image exposure based on the proportion of very dark or very bright pixels."""
-    if img.ndim > 2:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    flat = img.flatten() / 255.0
-    return ((flat < dark_thresh).mean() < 0.5 and
-            (flat > bright_thresh).mean() < 0.5)
-
-def filter_images_by_quality(
-    folder_path: str,
-    sharpness_thresh: float = 100.0,
-    min_width: int = 300,
-    min_height: int = 300,
-    dark_thresh: float = 0.05,
-    bright_thresh: float = 0.95
-) -> List[Path]:
-    """Apply quality filters to images in a folder, deleting low-quality ones.
-    Returns a list of paths to the images that passed all filters.
-    """
-    good_images = []
-    for path_obj in Path(folder_path).glob("*.jpg"):
-        try:
-            img = cv2.imread(str(path_obj), cv2.IMREAD_COLOR)
-            if img is None:
-                 print(f"[WARN] Could not read image file {path_obj} – skipping quality check")
-                 continue
-            if (has_enough_resolution(img, min_width, min_height) and
-                is_sharp(img, sharpness_thresh) and
-                is_well_exposed(img, dark_thresh, bright_thresh)):
-                good_images.append(path_obj)
-            else:
-                os.remove(path_obj)
-                print(f"  • filtered out low-quality image: {path_obj}")
-        except Exception as e:
-             print(f"[ERROR] Error processing image {path_obj}: {e} – skipping quality check")
-    return good_images
 
 def parse_bbox_string(bbox_str: str) -> Dict[str, float]:
     parts = [float(p.strip()) for p in bbox_str.split(",")]

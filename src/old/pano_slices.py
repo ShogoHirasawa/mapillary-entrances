@@ -33,6 +33,10 @@ def slice_equirectangular(images: List[Dict], fov_half_angle: float = 45.0) -> L
 
         h, w = im.shape[:2]
         slice_w = w // 4  # four 90° slices (roughly quarter turns)
+        
+        # Get original compass angle (default to 0 if missing)
+        original_bearing = img.get("compass_angle") or 0.0
+        
         for i in range(4):
             x1, x2 = i * slice_w, (i + 1) * slice_w
             crop = im[:, x1:x2]
@@ -42,6 +46,11 @@ def slice_equirectangular(images: List[Dict], fov_half_angle: float = 45.0) -> L
             new_entry = dict(img)
             new_entry["path"] = str(slice_path)
             new_entry["slice_index"] = i
+            # Slices are no longer 360° panoramas, but preserve camera_type for reference
+            new_entry["is_360"] = False
+            # Update compass_angle for each slice: slice i represents bearing at i*90° offset
+            # For equirectangular: slice 0 = original, slice 1 = +90°, slice 2 = +180°, slice 3 = +270°
+            new_entry["compass_angle"] = (original_bearing + (i * 90.0)) % 360.0
             sliced.append(new_entry)
 
     return sliced
