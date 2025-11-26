@@ -16,7 +16,7 @@ PYTHONUNBUFFERED=1 PYTHONPATH=. python3 -m src.pipeline \
   --place_radius=100 \
   --max_images=50 \
   --prefer_360 \
-  --model="yolo_weights_500_image_set.pt" \
+  --model="yolo_weights_750_image_set.pt" \
   --device="cpu" \
   --conf=0.60 \
   --iou=0.50 \
