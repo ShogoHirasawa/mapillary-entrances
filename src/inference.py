@@ -1,5 +1,5 @@
-from utils.inference_utils import *
-from utils.mapillary_utils import _is_360
+from src.utils.inference_utils import *
+from src.utils.mapillary_utils import _is_360
 try:
     from ultralytics import YOLO
     _HAS_ULTRALYTICS = True

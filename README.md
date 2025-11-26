@@ -75,7 +75,6 @@ Example Usage:
   --place_radius=100 \
   --max_images=50 \
   --prefer_360 \
-  --src_mode=local \
   --model="yolo_weights_500_image_set.pt" \
   --device="cpu" \
   --conf=0.60 \

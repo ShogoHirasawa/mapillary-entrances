@@ -1,8 +1,10 @@
 # pipeline.py
+
 import argparse
-from .api import get_buildings_and_imagery_in_radius
-from .inference_v2 import run_inference, write_geojson_for_verification
-from .download_v2 import download_overture_radius
+from src.utils.io_utils import write_geojson_for_verification
+from src.api import get_buildings_and_imagery_in_radius
+from src.inference import run_inference
+from src.download import download_overture_radius
 import dotenv; dotenv.load_dotenv()
 
 '''
@@ -14,12 +16,11 @@ PYTHONUNBUFFERED=1 PYTHONPATH=. python3 -m src.pipeline \
   --place_radius=100 \
   --max_images=50 \
   --prefer_360 \
-  --src_mode=local \
   --model="yolo_weights_500_image_set.pt" \
   --device="cpu" \
   --conf=0.60 \
   --iou=0.50 \
-  --save-vis="./outputs/visualizations"
+  --save="outputs"
 '''
 
 def build_parser():
@@ -31,13 +32,12 @@ def build_parser():
     p.add_argument("--limit_buildings", type=int)
     p.add_argument("--max_images", type=int, default=20)
     p.add_argument("--prefer_360", action="store_true")
-    p.add_argument("--src_mode", choices=["auto","local","s3"], default="auto")
     p.add_argument("--min_capture_date", type=str)
  
     # inference args for inference.py
     p.add_argument("--model", type=str, required=True)
     p.add_argument("--device", type=str, default="cpu")
-    p.add_argument("--save-vis", type=str)
+    p.add_argument("--save", type=str)
     p.add_argument("--score-thresh", type=float, default=0.25)
     p.add_argument("--conf", type=float, default=0.5)
     p.add_argument("--iou", type=float, default=0.5)
@@ -55,8 +55,8 @@ def main():
     print(f"Downloading Overture data within {args.search_radius} m of ({lat}, {lon})...")
 
     download_overture_radius(lat, lon, args.search_radius,
-                            out_buildings="data/buildings_local.parquet",
-                            out_places="data/places_local.parquet"
+                            out_buildings="../data/buildings_local.parquet",
+                            out_places="../data/places_local.parquet"
                             )
     
     print("Relevant Buildings/Places Data Downloaded")
@@ -65,8 +65,7 @@ def main():
     print("Gathering Imagery")
     data = get_buildings_and_imagery_in_radius(lat, lon, args.search_radius,
                                           args.place_radius, args.max_images,
-                                          args.min_capture_date, args.prefer_360,
-                                          args.src_mode)
+                                          args.min_capture_date, args.prefer_360)
     
     # inference
     if len(data['image_dicts']) > 0:
@@ -75,7 +74,7 @@ def main():
 
         building_entrances, buildings_lat_lon, place_names, images_with_detections = run_inference(data, args.model, 
                                                                                                    args.conf, args.iou, 
-                                                                                                   args.device, args.save_vis)
+                                                                                                   args.device, args.save)
         
         print("Finished Inference")
 
@@ -92,6 +91,7 @@ def main():
             buildings_lat_lon,
             place_names,
             images_with_detections,
+            output_dir = args.save,
             output_name = f"{lat:.5f}_{lon:.5f}.geojson"
         )
 if __name__ == "__main__":

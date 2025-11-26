@@ -1,34 +1,12 @@
-# --- new file: src/api.py ---
-# interface for buildings/images/places near a (lat, lon) point. uses same pipeline
-# pieces but returns results in-memory as a dict 
+# api.py
+from typing import Optional, Dict, Any, List
+from src.utils.geo_utils import simple_radius_to_bbox
+from src.utils.matching_utils import resolve_sources, select_best_place_for_building
+from src.utils.duck_db_utils import get_buildings, join_buildings_places
+from src.utils.polygon_utils import polygon_vertices_from_wkt
+from src.utils.mapillary_utils import _extract_lon_lat
+from src.imagery import fetch_and_slice_for_building
 
-# example usage
-
-
-from __future__ import annotations
-from typing import Any, Dict, List, Optional, Tuple
-from pathlib import Path
-import math
-import pandas as pd
-
-from .utils import polygon_vertices_from_wkt
-from .buildings import get_buildings
-from .places import join_buildings_places
-from .selection import select_best_place_for_building
-from .imagery import fetch_and_slice_for_building, _extract_lon_lat
-from .sources import resolve_sources
-
-def _point_bbox(lon: float, lat: float, meters: float = 80.0) -> Dict[str, float]:
-    # simple meters to deg approximation for small areas
-    dy = meters / 111_320.0
-    dx = meters / (111_320.0 * math.cos(math.radians(lat)))
-    return {"xmin": lon - dx, "ymin": lat - dy, "xmax": lon + dx, "ymax": lat + dy}
-
-def _nearest_building(bdf: pd.DataFrame, lat: float, lon: float) -> pd.Series:
-    if bdf.empty:
-        raise RuntimeError("No buildings in bbox")
-    d2 = (bdf["lat"] - lat)**2 + (bdf["lon"] - lon)**2
-    return bdf.loc[d2.idxmin()]
 
 def get_buildings_and_imagery_in_radius(
     lat: float,
@@ -38,7 +16,6 @@ def get_buildings_and_imagery_in_radius(
     max_images_total: int,
     min_capture_date: Optional[str],
     prefer_360: bool,
-    src_mode: str,
 ) -> Dict[str, Any]:
     """
     Multi-building + shared imagery adapter for inference.py
@@ -57,8 +34,8 @@ def get_buildings_and_imagery_in_radius(
     """
 
     # define bounding box and load building and place data
-    bbox = _point_bbox(lon, lat, meters=search_radius_m)
-    b_src, p_src = resolve_sources(bbox, src_mode)
+    bbox = simple_radius_to_bbox(lon, lat, meters=search_radius_m)
+    b_src, p_src = resolve_sources(bbox)
     bdf = get_buildings(bbox, b_src, limit_hint=200)
     if bdf is None or len(bdf) == 0:
         print("[WARN] No buildings found in radius.")

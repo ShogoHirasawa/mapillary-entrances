@@ -1,23 +1,20 @@
 # matching_utils.py
 
 from typing import Any, Optional, Tuple, Dict
-from .constants import _CAT_PRIOR, LOCAL_BUILDINGS, LOCAL_PLACES, S3_BUILDINGS, S3_PLACES
+from .constants import _CAT_PRIOR, LOCAL_BUILDINGS, LOCAL_PLACES
 
-def resolve_sources(_: Dict[str,float], src_mode: str = "auto") -> Tuple[str, str]:
+def resolve_sources(_: Dict[str,float]) -> Tuple[str, str]:
+    """
+    Returns paths to local building and place parquet files.
+    These files are downloaded by the pipeline before this function is called.
+    """
     lb = LOCAL_BUILDINGS if LOCAL_BUILDINGS.exists() else None
     lp = LOCAL_PLACES    if LOCAL_PLACES.exists()    else None
 
-    if src_mode == "s3":
-        return S3_BUILDINGS, S3_PLACES
-
-    if src_mode == "local":
-        if not (lb and lp):
-            raise RuntimeError("local mode but local geoparquet missing.")
-        return str(lb), str(lp)
-
-    # auto: prefer local, else S3
-    return (str(lb) if lb else S3_BUILDINGS,
-            str(lp) if lp else S3_PLACES)
+    if not (lb and lp):
+        raise RuntimeError("Local parquet files not found.")
+    
+    return str(lb), str(lp)
 
 def _cat_weight(categories: Any) -> float:
     """

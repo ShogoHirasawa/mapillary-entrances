@@ -1,10 +1,10 @@
 # src/download_v2.py
 
 from pathlib import Path
-from utils.constants import S3_BUILDINGS, S3_PLACES
-from utils.duck_db_utils import open_duckdb, _try
-from utils.polygon_utils import bbox_to_wkt
-from utils.geo_utils import robust_radius_to_bbox
+from src.utils.constants import S3_BUILDINGS, S3_PLACES
+from src.utils.duck_db_utils import open_duckdb, _try
+from src.utils.polygon_utils import bbox_to_wkt
+from src.utils.geo_utils import robust_radius_to_bbox
 
 
 def download_overture_radius(lat: float, lon: float, radius_m: int,

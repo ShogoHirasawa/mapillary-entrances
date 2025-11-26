@@ -1,18 +1,14 @@
 from pathlib import Path
 
-RELEASE = "2025-09-24.0"
+RELEASE = "2025-10-22.0"
 
 EARTH_RADIUS_M = 6378137
 
+# Local parquet file paths
 LOCAL_BUILDINGS = Path("../data/buildings_local.parquet")
 LOCAL_PLACES    = Path("../data/places_local.parquet")
 
-BUILDINGS_SRC = str(LOCAL_BUILDINGS) if LOCAL_BUILDINGS.exists() else \
-    f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=buildings/type=building/*"
-
-PLACES_SRC = str(LOCAL_PLACES) if LOCAL_PLACES.exists() else \
-    f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=places/type=place/*"
-
+# S3 paths for downloading Overture data
 S3_BUILDINGS = f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=buildings/type=building/*"
 S3_PLACES    = f"s3://overturemaps-us-west-2/release/{RELEASE}/theme=places/type=place/*"
 
