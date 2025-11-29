@@ -1,5 +1,7 @@
 from src.utils.inference_utils import *
 from src.utils.mapillary_utils import _is_360
+from collections import defaultdict
+from src.utils.geo_utils import _haversine
 try:
     from ultralytics import YOLO
     _HAS_ULTRALYTICS = True
@@ -62,7 +64,8 @@ def run_inference(data, yolo_weights, conf, iou, device, save_vis):
     # convert entrance point back to lon,lat, attach to entrances dictionary with associated building id
     # building_entrances -> {building_id : (lon,lat), ...}
 
-    building_entrances = {}
+    #building_entrances = {}
+    building_entrances = []
     images_with_detections = {}
     for img in all_images:
         path = img['image_path']
@@ -74,20 +77,69 @@ def run_inference(data, yolo_weights, conf, iou, device, save_vis):
         entrances_xy = []
         for d in detections:
             C, dir_xy = extract_bbox_coordinates(img, d, proj_local, get_fov_half_angle(img))
-            print(f"C = {C}, dir_xy = {dir_xy}")
-            bid, hit_xy = match_entrance_to_building((C, dir_xy), buildings_xy, max_range_m=120.0)
-            print(f"bid: {bid}, hit_xy:{hit_xy}")
+
+            bid, hit_xy, seg = match_entrance_to_building((C, dir_xy), buildings_xy, max_range_m=60.0)
+
             if bid is None or hit_xy is None:
                 continue
-            # shift hit slightly outward toward camera to account for building polygons -> roof of building
-            #hit_xy = hit_xy - 6.0 * dir_xy
-            print("Building matched")
-            entrances_xy.append((bid, hit_xy))
-            print(f"Image coordinates: {img['coordinates']}")
-            images_with_detections[path] = img['coordinates']
 
-        for (building_id, e_xy) in entrances_xy:
-            entrance_lon, entrance_lat = to_lonlat_xy(e_xy, proj_local)
-            building_entrances[building_id] = (entrance_lon, entrance_lat)
-       
+            print("Building matched")
+            entrances_xy.append({"bid":bid, "image_path":path, "hit":hit_xy, "wall_segment": (seg[0].tolist(), seg[1].tolist())})
+            #entrances_xy.append((bid, hit_xy))
+            images_with_detections[path] = img['coordinates']
+        
+        for dic in entrances_xy:
+            entrance_lon, entrance_lat = to_lonlat_xy(dic["hit"], proj_local)
+            dic["entrance"] = (entrance_lon, entrance_lat)
+            building_entrances.append(dic)
+        
+    print(f"len(building_entrances) : {len(building_entrances)}")
+
+    if len(building_entrances) > 0:
+        building_entrances = clamp_entrance_to_hit_segment(proj_local, building_entrances)
+        
+        groups = defaultdict(list)
+        for d in building_entrances:
+            bid = d.get("bid")
+            ent = d.get("entrance")
+            if bid and ent and len(ent) == 2:
+                groups[bid].append(d)
+
+        # Dedup within each building group
+        deduped = []
+        for bid, items in groups.items():
+            clusters = []
+            for it in items:
+                lon, lat = it["entrance"]
+                placed = False
+                for cl in clusters:
+                    _, (lon0, lat0) = cl[0]
+                    if _haversine(lat, lon, lat0, lon0) < 5.0:
+                        cl.append((it, (lon, lat)))
+                        placed = True
+                        break
+                if not placed:
+                    clusters.append([(it, (lon, lat))])
+
+            # from each cluster, keep mean lon/lat
+            for cl in clusters:
+                lons = [pt[1][0] for pt in cl]
+                lats = [pt[1][1] for pt in cl]
+                lon_mean = float(np.mean(lons))
+                lat_mean = float(np.mean(lats))
+
+                # build a clean entrance record
+                rep = {
+                    "bid": bid,
+                    "entrance": (lon_mean, lat_mean),
+                    "snapped": any(it.get("snapped", False) for (it, _) in cl),
+                    "image_path": cl[0][0].get("image_path"),
+                    "hit": cl[0][0].get("hit"),
+                    "wall_segment": cl[0][0].get("wall_segment"),
+                }
+                deduped.append(rep)
+
+        building_entrances = deduped
+        
+
     return building_entrances, buildings_lat_lon, place_names, images_with_detections

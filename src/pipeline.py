@@ -81,11 +81,12 @@ def main():
         if len(building_entrances) == 0:
             print("Could Not Find Any Entrances")
 
-        for id in building_entrances:
-            print(f"Building ID: {id}, Entrance: {building_entrances[id]}, Place ID: {place_names[id]['place_id']}")
+        for dic in building_entrances:
+            id = dic['bid']
+            print(f"Building ID: {id}, Entrance: {dic['entrance']}, Place ID: {place_names[id]['place_id']}")
             print(f"Building polygon: {buildings_lat_lon[id]}")
-            print(f"Entrance in lat,lon format: {building_entrances[id][1],building_entrances[id][0]}")
-        
+            print(f"Entrance in lat,lon format: {dic['entrance'][1], dic['entrance'][0]}")
+
         write_geojson_for_verification(
             building_entrances,
             buildings_lat_lon,

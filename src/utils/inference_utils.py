@@ -6,7 +6,7 @@ import math
 import numpy as np
 import cv2
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Any
 
 try:
     from ultralytics import YOLO
@@ -249,8 +249,6 @@ def extract_bbox_coordinates(
         v = float(yc + 0.5 * bh)
 
     # turn pixel u into a yaw offset using a pinhole model
-    fx = horizontal_fov_to_fx(W, hfov_deg)
-    cx = 0.5 * W
     if _is_360(image_dict):
         yaw_offset_deg = (u / W) * 360.0 - 180.0
     else:
@@ -288,38 +286,85 @@ def _ray_segment_intersection(C, d, A, B, t_min=0.0):
     return None, None, False
 
 
-def match_entrance_to_building(ray, buildings_xy, max_range_m=100.0, spread_deg=5.0):
-    """
-    cast a small fan of rays (±spread_deg) around the main direction vector `d`.
-    Returns the closest intersection across all building polygons.
-    """
+def match_entrance_to_building(ray, buildings_xy, max_range_m=120.0, spread_deg=5.0):
     C, d = ray
     best_bid = None
     best_t = float("inf")
     best_hit = None
+    best_seg = None
+
     candidates = {}
 
-    # try slight angular offsets to make matching robust
     for delta in [-spread_deg, 0, spread_deg]:
         theta = math.atan2(d[1], d[0]) + math.radians(delta)
         d_rot = np.array([math.cos(theta), math.sin(theta)], dtype=float)
 
         for bid, poly in buildings_xy.items():
             for i in range(len(poly)):
-                A = np.asarray(poly[i], dtype=float)
-                B = np.asarray(poly[(i + 1) % len(poly)], dtype=float)
+                A = np.asarray(poly[i], dtype=float).reshape(2)
+                B = np.asarray(poly[(i+1) % len(poly)], dtype=float).reshape(2)
                 hit, t, ok = _ray_segment_intersection(C, d_rot, A, B)
+
                 if ok and 0.1 < t < best_t and t <= max_range_m:
+                    best_t = t
+                    best_bid = bid
+                    best_hit = hit
+                    best_seg = (A, B)
                     candidates.setdefault(bid, []).append(t)
 
-    # if no valid intersections, break
-    if not candidates:
-        return None, None
+    if not best_bid:
+        return None, None, None
 
-    # choose the building whose median hit distance is the smallest
-    best_bid = min(candidates, key=lambda k: np.median(candidates[k]))
-    best_t = np.median(candidates[best_bid])
+    return best_bid, best_hit, best_seg  # return the actual intersected segment
 
-    # compute the intersection point in local XY
-    best_hit = C + best_t * d
-    return best_bid, best_hit
+
+def snap_point_to_segment(P, A, B):
+    AP = P - A
+    AB = B - A
+    t = float(np.dot(AP, AB) / np.dot(AB, AB))
+    t_clamped = max(0.0, min(1.0, t))
+    return A + t_clamped * AB
+
+def point_line_distance_segment(P, A, B):
+    P = np.asarray(P, float).reshape(2)
+    A = np.asarray(A, float).reshape(2)
+    B = np.asarray(B, float).reshape(2)
+    AB = B - A
+    d2 = np.dot(AB, AB)
+    if d2 < 1e-12:
+        return float(np.linalg.norm(P - A))
+    t = float(np.dot(P - A, AB) / d2)
+    t = max(0.0, min(1.0, t))
+    return float(np.linalg.norm(P - (A + t * AB)))
+
+
+
+def clamp_entrance_to_hit_segment(
+    proj_local,
+    building_entrances: List[Dict],
+    overshoot_threshold_m: float = 2.0,
+) -> List[Dict]:
+
+    clamped = []
+
+    for ent in building_entrances:
+        bid = ent["bid"]
+        P = ent["hit"]
+
+        # extract the segment that the detection was already matched to
+        seg_A, seg_B = ent["wall_segment"]
+
+        A = np.asarray(seg_A, float).reshape(2)
+        B = np.asarray(seg_B, float).reshape(2)
+        dist = point_line_distance_segment(P, A, B)
+
+        # if it's too far outside, project it back
+        if dist > overshoot_threshold_m:
+            P_new = snap_point_to_segment(P, A, B)
+            lon2, lat2 = to_lonlat_xy(P_new, proj_local)
+            ent["entrance"] = (lon2, lat2)
+            print(f"[CLAMPED] {bid} snapped back to detected wall segment (overshoot = {dist:.2f} m)")
+
+        clamped.append(ent)
+
+    return clamped
