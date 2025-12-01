@@ -66,7 +66,6 @@ def run_inference(data, yolo_weights, conf, iou, device, save_vis):
 
     #building_entrances = {}
     building_entrances = []
-    images_with_detections = {}
     for img in all_images:
         path = img['image_path']
         detections = validate_folder_with_seg_and_yolo(path, yolo_weights, conf, iou, device, save_vis)
@@ -85,8 +84,6 @@ def run_inference(data, yolo_weights, conf, iou, device, save_vis):
 
             print("Building matched")
             entrances_xy.append({"bid":bid, "image_path":path, "hit":hit_xy, "wall_segment": (seg[0].tolist(), seg[1].tolist())})
-            #entrances_xy.append((bid, hit_xy))
-            images_with_detections[path] = img['coordinates']
         
         for dic in entrances_xy:
             entrance_lon, entrance_lat = to_lonlat_xy(dic["hit"], proj_local)
@@ -105,7 +102,7 @@ def run_inference(data, yolo_weights, conf, iou, device, save_vis):
             if bid and ent and len(ent) == 2:
                 groups[bid].append(d)
 
-        # Dedup within each building group
+        # remove duplicates within each building group
         deduped = []
         for bid, items in groups.items():
             clusters = []
@@ -142,4 +139,4 @@ def run_inference(data, yolo_weights, conf, iou, device, save_vis):
         building_entrances = deduped
         
 
-    return building_entrances, buildings_lat_lon, place_names, images_with_detections
+    return building_entrances, buildings_lat_lon, place_names

@@ -7,6 +7,7 @@ import numpy as np
 import cv2
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple, Any
+from huggingface_hub import hf_hub_download
 
 try:
     from ultralytics import YOLO
@@ -101,15 +102,33 @@ def filter_images_by_quality(
 # Run model on images to detect entrance
 
 def load_yolo_model(model_path: str, device: Optional[str] = None):
+    # load YOLO model, auto-downloading weights from Hugging Face if missing
 
+    # determine local cache path (repo root)
+    FILE = Path(model_path).name
+    LOCAL = Path("./") / FILE
+
+    # if missing locally, download from Hugging Face
+    if not LOCAL.exists():
+        print("⬇ Downloading YOLO weights from Hugging Face...")
+        downloaded = hf_hub_download(
+            repo_id="erantala1/yolov8s-entrance-detector",
+            filename=FILE
+        )
+        LOCAL.write_bytes(Path(downloaded).read_bytes())
+        print("Downloaded to:", LOCAL.resolve())
+
+    # load YOLO model from local cache
     if not _HAS_ULTRALYTICS:
         raise RuntimeError("ultralytics not installed. `pip install ultralytics`")
 
-    model = YOLO(model_path)  # ultralytics auto-selects device unless specified
+    model = YOLO(str(LOCAL))  # load from cached HF weights
+
+    # set device override if specified
     if device is not None:
-        # The ultralytics API selects device at predict() time; we’ll pass device then.
         model.overrides = model.overrides or {}
         model.overrides['device'] = device
+
     return model
 
 
@@ -185,8 +204,6 @@ def validate_folder_with_seg_and_yolo(
     # Keep only door class if model has multiple classes; otherwise keep all
     entrance_dets = [d for d in dets if d.get("cls_name", "").lower().find("entrance") != -1 or True]
 
-    print(f"detections: {len(entrance_dets)}")
-    #assume for now there will only be one door detection in an image
     if len(dets) > 0:
         if save_dir:
             Path(save_vis_dir).mkdir(parents=True, exist_ok=True)
@@ -198,7 +215,6 @@ def validate_folder_with_seg_and_yolo(
                 print(f"[WARN] cv2.imwrite failed: {out_path}")
             else:
                 print(f"[OK] wrote {out_path}")
-    print(f"Number of detections:{len(entrance_dets)}")
     if len(entrance_dets) == 0:
         return []
     else:

@@ -11,7 +11,7 @@ import dotenv; dotenv.load_dotenv()
 Example Usage:
 
 PYTHONUNBUFFERED=1 PYTHONPATH=. python3 -m src.pipeline \
-  --input_point="47.610,-122.341" \
+  --input_point="37.780,-122.4092" \
   --search_radius=100 \
   --place_radius=100 \
   --max_images=50 \
@@ -72,9 +72,9 @@ def main():
         print("Finished Gathering Data")
         print("Starting Inference")
 
-        building_entrances, buildings_lat_lon, place_names, images_with_detections = run_inference(data, args.model, 
-                                                                                                   args.conf, args.iou, 
-                                                                                                   args.device, args.save)
+        building_entrances, buildings_lat_lon, place_names = run_inference(data, args.model, 
+                                                                            args.conf, args.iou, 
+                                                                            args.device, args.save)
         
         print("Finished Inference")
 
@@ -91,7 +91,6 @@ def main():
             building_entrances,
             buildings_lat_lon,
             place_names,
-            images_with_detections,
             output_dir = args.save,
             output_name = f"{lat:.5f}_{lon:.5f}.geojson"
         )
