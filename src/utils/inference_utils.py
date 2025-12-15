@@ -302,36 +302,94 @@ def _ray_segment_intersection(C, d, A, B, t_min=0.0):
     return None, None, False
 
 
-def match_entrance_to_building(ray, buildings_xy, max_range_m=120.0, spread_deg=5.0):
+def match_entrance_to_building(
+    ray,
+    buildings_xy,
+    max_range_m=60.0,
+    spread_deg=1.0,
+):
     C, d = ray
     best_bid = None
-    best_t = float("inf")
-    best_hit = None
-    best_seg = None
+    best_score = float("inf")
 
-    candidates = {}
+    # store candidates per building
+    building_candidates = {}
 
-    for delta in [-spread_deg, 0, spread_deg]:
-        theta = math.atan2(d[1], d[0]) + math.radians(delta)
-        d_rot = np.array([math.cos(theta), math.sin(theta)], dtype=float)
+    base_bearing = math.atan2(d[0], d[1])
+    for delta in (-spread_deg, 0.0, spread_deg):
+        bearing = base_bearing + math.radians(delta)
+        d_rot = np.array([math.sin(bearing), math.cos(bearing)], dtype=float)
 
         for bid, poly in buildings_xy.items():
+            poly = np.asarray(poly, float)
+            centroid = poly.mean(axis=0)
+
+            if np.dot(centroid - C, d_rot) <= 0:
+                continue
+
             for i in range(len(poly)):
-                A = np.asarray(poly[i], dtype=float).reshape(2)
-                B = np.asarray(poly[(i+1) % len(poly)], dtype=float).reshape(2)
+                A = poly[i]
+                B = poly[(i + 1) % len(poly)]
+
                 hit, t, ok = _ray_segment_intersection(C, d_rot, A, B)
+                if not ok or t <= 0.1 or t > max_range_m:
+                    continue
 
-                if ok and 0.1 < t < best_t and t <= max_range_m:
-                    best_t = t
+                wall = B - A
+                norm = np.linalg.norm(wall)
+                if norm < 1e-9:
+                    continue
+                wall /= norm
+                n1 = np.array([wall[1], -wall[0]])
+                n2 = -n1
+                n = n1 if np.dot(n1, C - A) > 0 else n2
+                if np.dot(d_rot, n) >= 0:
+                    continue
+
+                lateral = abs(np.cross(d_rot, hit - C)) / np.linalg.norm(hit - C)
+                score = t + 2.0 * lateral
+                building_candidates.setdefault(bid, []).append({
+                    "hit": hit,
+                    "segment": (A, B),
+                    "t": t,
+                    "lateral": lateral,
+                    "score": score,
+                })
+                if score < best_score:
+                    best_score = score
                     best_bid = bid
-                    best_hit = hit
-                    best_seg = (A, B)
-                    candidates.setdefault(bid, []).append(t)
+                    
+    if best_bid is None:
+        return None, None
 
-    if not best_bid:
-        return None, None, None
+    return best_bid, building_candidates[best_bid]
 
-    return best_bid, best_hit, best_seg  # return the actual intersected segment
+def select_exterior_seg(candidates, camera_xy):
+    best = None
+    best_score = float("inf")
+
+    for c in candidates:
+        A, B = c["segment"]
+        A = np.asarray(A, float)
+        B = np.asarray(B, float)
+        mid = 0.5 * (A + B)
+        wall = B - A
+        wall /= np.linalg.norm(wall)
+
+        n1 = np.array([wall[1], -wall[0]])
+        n2 = -n1
+        n = n1 if np.dot(n1, camera_xy - mid) > 0 else n2
+        if np.dot(n, camera_xy - mid) <= 0:
+            continue
+
+        dist_cam = np.linalg.norm(mid - camera_xy)
+        score = (c["t"] + 1.5 * c["lateral"] + 0.05 * dist_cam)
+
+        if score < best_score:
+            best_score = score
+            best = c
+
+    return best
 
 
 def snap_point_to_segment(P, A, B):
@@ -340,6 +398,7 @@ def snap_point_to_segment(P, A, B):
     t = float(np.dot(AP, AB) / np.dot(AB, AB))
     t_clamped = max(0.0, min(1.0, t))
     return A + t_clamped * AB
+
 
 def point_line_distance_segment(P, A, B):
     P = np.asarray(P, float).reshape(2)
@@ -354,32 +413,46 @@ def point_line_distance_segment(P, A, B):
     return float(np.linalg.norm(P - (A + t * AB)))
 
 
+def outward_normal(A, B, C):
+    wall = B - A
+    wall /= np.linalg.norm(wall)
+
+    n1 = np.array([wall[1], -wall[0]])
+    n2 = -n1
+
+    return n1 if np.dot(n1, C - A) > 0 else n2
 
 def clamp_entrance_to_hit_segment(
     proj_local,
     building_entrances: List[Dict],
-    overshoot_threshold_m: float = 2.0,
+    outward_offset_m: float = 0.5,
+    max_lateral_error_m: float = 3.0,
 ) -> List[Dict]:
 
     clamped = []
 
     for ent in building_entrances:
-        bid = ent["bid"]
-        P = ent["hit"]
+        P = np.asarray(ent["hit"], float)
+        C = np.asarray(ent["camera_xy"], float)
 
-        # extract the segment that the detection was already matched to
-        seg_A, seg_B = ent["wall_segment"]
+        A, B = ent["wall_segment"]
+        A = np.asarray(A, float)
+        B = np.asarray(B, float)
 
-        A = np.asarray(seg_A, float).reshape(2)
-        B = np.asarray(seg_B, float).reshape(2)
-        dist = point_line_distance_segment(P, A, B)
+        # lateral sanity check
+        lateral = point_line_distance_segment(P, A, B)
+        if lateral > max_lateral_error_m:
+            continue
 
-        # if it's too far outside, project it back
-        if dist > overshoot_threshold_m:
-            P_new = snap_point_to_segment(P, A, B)
-            lon2, lat2 = to_lonlat_xy(P_new, proj_local)
-            ent["entrance"] = (lon2, lat2)
-            print(f"[CLAMPED] {bid} snapped back to detected wall segment (overshoot = {dist:.2f} m)")
+        P_wall = snap_point_to_segment(P, A, B)
+        n = outward_normal(A, B, C)
+        P_out = P_wall + outward_offset_m * n
+
+        lon, lat = to_lonlat_xy(P_out, proj_local)
+
+        ent["entrance"] = (lon, lat)
+        ent["entrance_xy"] = P_out
+        ent["snapped"] = True
 
         clamped.append(ent)
 

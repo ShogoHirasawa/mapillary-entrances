@@ -72,24 +72,29 @@ def run_inference(data, yolo_weights, conf, iou, device, save_vis):
         # when no detections are made, move to next image
         if detections is None:
             continue
-        print(f"Found {len(detections)} in image: {path}")
+        if len(detections) > 1:
+            print(f"Found {len(detections)} in image: {path}")
         entrances_xy = []
         for d in detections:
             C, dir_xy = extract_bbox_coordinates(img, d, proj_local, get_fov_half_angle(img))
+            bid, candidates = match_entrance_to_building(
+                (C, dir_xy), buildings_xy, max_range_m=60.0
+            )
 
-            bid, hit_xy, seg = match_entrance_to_building((C, dir_xy), buildings_xy, max_range_m=60.0)
-
-            if bid is None or hit_xy is None:
+            if bid is None or not candidates:
                 continue
 
+            best = select_exterior_seg(candidates, C)
+            if best is None:
+                continue
+
+            hit_xy = best["hit"]
+            seg = best["segment"]
+
             print("Building matched")
-            entrances_xy.append({"bid":bid, "image_path":path, "hit":hit_xy, "wall_segment": (seg[0].tolist(), seg[1].tolist())})
-        
-        for dic in entrances_xy:
-            entrance_lon, entrance_lat = to_lonlat_xy(dic["hit"], proj_local)
-            dic["entrance"] = (entrance_lon, entrance_lat)
-            building_entrances.append(dic)
-        
+            entrances_xy.append({"camera_xy":C,"bid":bid, "image_path":path, "hit":hit_xy, "wall_segment": (seg[0].tolist(), seg[1].tolist())})
+        building_entrances.extend(entrances_xy)
+
     print(f"len(building_entrances) : {len(building_entrances)}")
 
     if len(building_entrances) > 0:
