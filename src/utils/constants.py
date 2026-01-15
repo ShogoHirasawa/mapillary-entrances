@@ -1,6 +1,33 @@
 from pathlib import Path
+import os
+import boto3
+from botocore import UNSIGNED
+from botocore.config import Config
 
-RELEASE = "2025-10-22.0"
+DEFAULT_RELEASE = "2025-12-17.0"  # fallback so the app still runs
+
+def get_latest_overture_release(bucket="overturemaps-us-west-2", prefix="release/") -> str:
+    s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+    paginator = s3.get_paginator("list_objects_v2")
+    pages = paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/")
+
+    releases = [
+        cp["Prefix"].replace(prefix, "").strip("/")
+        for page in pages
+        for cp in page.get("CommonPrefixes", [])
+    ]
+    if not releases:
+        raise RuntimeError("No Overture releases found")
+    return sorted(releases)[-1]
+
+def resolve_overture_release() -> str:
+    try:
+        return get_latest_overture_release()
+    except Exception as e:
+        print(f"[WARN] Could not fetch latest Overture release ({e}). Falling back to {DEFAULT_RELEASE}.")
+        return DEFAULT_RELEASE
+
+RELEASE = resolve_overture_release()
 
 EARTH_RADIUS_M = 6378137
 
